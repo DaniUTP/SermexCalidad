@@ -282,6 +282,7 @@
             max-width: 500px;
         }
         
+        /* CARTAS MÁS PEQUEÑAS Y ELEGANTES */
         .card {
             aspect-ratio: 1;
             background: var(--gradient-primary);
@@ -350,6 +351,7 @@
             box-shadow: var(--box-shadow);
         }
         
+        /* Tienda mejorada */
         .shop-section {
             margin-top: 20px;
         }
@@ -497,6 +499,7 @@
             font-size: 14px;
         }
         
+        /* Responsive mejorado */
         @media (max-width: 768px) {
             .level-options {
                 flex-direction: column;
@@ -576,6 +579,7 @@
             }
         }
         
+        /* Efectos visuales adicionales */
         .floating {
             animation: floating 3s ease-in-out infinite;
         }
