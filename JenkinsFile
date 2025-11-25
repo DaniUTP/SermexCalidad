@@ -3,7 +3,7 @@ pipeline {
 
     environment {
         PROJECT_DIR   = "${WORKSPACE}\\project"
-        SOURCE_REPO   = "https://github.com/DaniUTP/memorefuerzo.git"
+        SOURCE_REPO   = "https://github.com/ZoneMinder/zoneminder.git"
         TARGET_REPO   = "https://github.com/DaniUTP/SermexCalidad.git"
         SONAR_SCANNER = "C:\\Users\\Daniel\\Documents\\Actividades avanzadas calidad de software\\expo calidad repo daniel\\sonar-scanner-cli-7.3.0.5189-windows-x64\\sonar-scanner-7.3.0.5189-windows-x64\\bin\\sonar-scanner.bat"
     }
@@ -18,7 +18,7 @@ pipeline {
             }
         }
 
-        stage('Clonar Repositorio Fuente') {
+        stage('Clonar Repositorio Zoneminder') {
             steps {
                 bat """
                 cd /d "${PROJECT_DIR}"
@@ -42,63 +42,61 @@ pipeline {
             }
         }
 
-stage('Obtener y Validar Métricas SonarQube') {
-    steps {
-        script {
-            withCredentials([string(credentialsId: 'sonarqube', variable: 'TOKEN')]) {
+        stage('Obtener y Validar Métricas SonarQube') {
+            steps {
+                script {
+                    withCredentials([string(credentialsId: 'sonarqube', variable: 'TOKEN')]) {
 
-                def metricsUrl = "http://localhost:9000/api/measures/component?component=SERMEX&metricKeys=bugs,vulnerabilities,code_smells,coverage,duplicated_lines_density,security_hotspots"
+                        def metricsUrl = "http://localhost:9000/api/measures/component?component=SERMEX&metricKeys=bugs,vulnerabilities,code_smells,coverage,duplicated_lines_density,security_hotspots"
 
-                bat """
-                curl -s -u %TOKEN%: "${metricsUrl}" -o "${PROJECT_DIR}\\metrics.json"
-                """
+                        bat """
+                        curl -s -u %TOKEN%: "${metricsUrl}" -o "${PROJECT_DIR}\\metrics.json"
+                        """
 
-                def parseJson = { text -> new groovy.json.JsonSlurper().parseText(text) }
-                def json = parseJson(readFile("${PROJECT_DIR}\\metrics.json"))
+                        def parseJson = { text -> new groovy.json.JsonSlurper().parseText(text) }
+                        def json = parseJson(readFile("${PROJECT_DIR}\\metrics.json"))
 
-                echo "=== MÉTRICAS DEL PROYECTO SERMEX ==="
+                        echo "Metricas obtenidas del analisis del proyecto:"
 
-                // Convertir el listado a un mapa {metric:value}
-                def metrics = [:]
-                json.component.measures.each { m ->
-                    metrics[m.metric] = (m.value ?: "0").toFloat()
-                    echo "${m.metric}: ${m.value}"
+                        def metrics = [:]
+                        json.component.measures.each { m ->
+                            metrics[m.metric] = (m.value ?: "0").toFloat()
+                            echo "${m.metric}: ${m.value}"
+                        }
+
+                        def errores = []
+
+                        if (metrics['bugs'] > 0)
+                            errores << "Bugs detectados: ${metrics['bugs']}"
+
+                        if (metrics['vulnerabilities'] > 0)
+                            errores << "Vulnerabilidades encontradas: ${metrics['vulnerabilities']}"
+
+                        if (metrics['code_smells'] > 20)
+                            errores << "Demasiados code smells: ${metrics['code_smells']}"
+
+                        if (metrics['coverage'] < 10)
+                            errores << "Cobertura muy baja: ${metrics['coverage']}%"
+
+                        if (metrics['duplicated_lines_density'] > 5)
+                            errores << "Código duplicado mayor a 5%: ${metrics['duplicated_lines_density']}%"
+
+                        if (metrics['security_hotspots'] > 0)
+                            errores << "Security Hotspots encontrados: ${metrics['security_hotspots']}"
+
+                        if (errores) {
+                            echo "HAY ERRORES EN EL CÓDIGO"
+                            errores.each { e -> echo e }
+                            error "El código no cumple los requisitos mínimos. Se cancela el push."
+                        }
+
+                        echo "EL CODIGO CUMPLE LOS REQUISITOS MINIMOS"
+                        echo "El código cumple todos los criterios. Continúa el pipeline."
+                    }
                 }
-
-                // ---- REGLAS DE VALIDACIÓN ----
-                def errores = []
-
-                if (metrics['bugs'] > 0)
-                    errores << "Bugs detectados: ${metrics['bugs']}"
-
-                if (metrics['vulnerabilities'] > 0)
-                    errores << "Vulnerabilidades encontradas: ${metrics['vulnerabilities']}"
-
-                if (metrics['code_smells'] > 20)   // Cambia el 20 si quieres
-                    errores << "Demasiados code smells: ${metrics['code_smells']}"
-
-                if (metrics['coverage'] < 10)      // Cambia el 10% si quieres
-                    errores << "Cobertura muy baja: ${metrics['coverage']}%"
-
-                if (metrics['duplicated_lines_density'] > 5)
-                    errores << "Código duplicado mayor a 5%: ${metrics['duplicated_lines_density']}%"
-
-                if (metrics['security_hotspots'] > 0)
-                    errores << "Security Hotspots encontrados: ${metrics['security_hotspots']}"
-
-                if (errores) {
-                    echo "=== VALIDACIÓN DE MÉTRICAS FALLÓ ==="
-                    errores.each { e -> echo e }
-                    error "El código NO cumple las métricas mínimas. Se cancela el push."
-                }
-
-                echo "=== MÉTRICAS VALIDAS ==="
-                echo "El código cumple todos los criterios. Continúa el pipeline."
             }
         }
-    }
-}
-        stage('Clonar Repositorio Destino') {
+        stage('Clonar Repositorio SermexCalidad') {
             steps {
                 bat """
                 cd /d "${PROJECT_DIR}"
@@ -115,7 +113,7 @@ stage('Obtener y Validar Métricas SonarQube') {
             }
         }
 
-        stage('Commit & Push') {
+        stage('Commit y Push') {
             steps {
                 withCredentials([string(credentialsId: 'github_token', variable: 'GIT_TOKEN')]) {
                     bat """
