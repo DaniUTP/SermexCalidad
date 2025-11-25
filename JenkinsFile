@@ -1,0 +1,171 @@
+pipeline {
+    agent any
+
+    environment {
+        PROJECT_DIR   = "${WORKSPACE}\\project"
+        SOURCE_REPO   = "https://github.com/DaniUTP/memorefuerzo.git"
+        TARGET_REPO   = "https://github.com/DaniUTP/SermexCalidad.git"
+        SONAR_SCANNER = "C:\\Users\\Daniel\\Documents\\Actividades avanzadas calidad de software\\expo calidad repo daniel\\sonar-scanner-cli-7.3.0.5189-windows-x64\\sonar-scanner-7.3.0.5189-windows-x64\\bin\\sonar-scanner.bat"
+    }
+
+    stages {
+        stage('Preparar Workspace') {
+            steps {
+                bat """
+                if exist "${PROJECT_DIR}" rd /s /q "${PROJECT_DIR}"
+                mkdir "${PROJECT_DIR}"
+                """
+            }
+        }
+
+        stage('Clonar Repositorio Fuente') {
+            steps {
+                bat """
+                cd /d "${PROJECT_DIR}"
+                git clone ${SOURCE_REPO} src
+                """
+            }
+        }
+
+        stage('Analizar con SonarQube') {
+            steps {
+                withCredentials([string(credentialsId: 'sonarqube', variable: 'TOKEN')]) {
+                    bat """
+                    cd /d "${PROJECT_DIR}\\src"
+                    "${SONAR_SCANNER}" ^
+                        -Dsonar.projectKey=SERMEX ^
+                        -Dsonar.sources=. ^
+                        -Dsonar.host.url=http://localhost:9000 ^
+                        -Dsonar.token=%TOKEN%
+                    """
+                }
+            }
+        }
+
+stage('Validar Métricas Reales de SonarQube') {
+    steps {
+        script {
+            def parseJson = { t -> new groovy.json.JsonSlurper().parseText(t) }
+
+            def reportFile = "${PROJECT_DIR}\\src\\.scannerwork\\report-task.txt"
+            if (!fileExists(reportFile)) error "No existe report-task.txt"
+
+            def contenido = readFile(reportFile)
+            def ceTaskUrl = contenido.split("\n")
+                .find { it.startsWith("ceTaskUrl=") }
+                ?.replace("ceTaskUrl=", "")
+                ?.trim()
+
+            if (!ceTaskUrl) error "ceTaskUrl no encontrado"
+
+            def analysisId = ""
+
+            waitUntil(initialRecurrencePeriod: 4000) {
+                withCredentials([string(credentialsId: 'sonarqube', variable: 'TOKEN')]) {
+                    bat """curl -s -u %TOKEN%: "${ceTaskUrl}" -o "${PROJECT_DIR}\\task.json" """
+                }
+
+                def json = parseJson(readFile("${PROJECT_DIR}\\task.json"))
+                def estado = json.task.status
+
+                echo "Estado CE: ${estado}"
+
+                if (estado == "SUCCESS") {
+                    analysisId = json.task.analysisId
+                    return true
+                }
+                if (estado == "FAILED") error "La tarea CE falló"
+                return false
+            }
+
+            echo "AnalysisId: ${analysisId}"
+
+            // Consultar métricas reales
+            withCredentials([string(credentialsId: 'sonarqube', variable: 'TOKEN')]) {
+                bat """
+                curl -s -u %TOKEN%: ^
+                "http://localhost:9000/api/measures/component?component=SERMEX&metricKeys=bugs,vulnerabilities,code_smells,duplicated_lines_density" ^
+                -o "${PROJECT_DIR}\\metrics.json"
+                """
+            }
+
+            def metrics = parseJson(readFile("${PROJECT_DIR}\\metrics.json")).component.measures
+
+            def getMetric = { key ->
+                def m = metrics.find { it.metric == key }
+                return m ? m.value.toInteger() : 0
+            }
+
+            def bugs  = getMetric("bugs")
+            def vulns = getMetric("vulnerabilities")
+            def smells = getMetric("code_smells")
+            def dup = metrics.find { it.metric == "duplicated_lines_density" }?.value?.toFloat() ?: 0
+
+            echo "---- MÉTRICAS DETECTADAS ----"
+            echo "Bugs: ${bugs}"
+            echo "Vulnerabilidades: ${vulns}"
+            echo "Code Smells: ${smells}"
+            echo "Duplicación: ${dup}%"
+            echo "-----------------------------"
+
+            // REGLAS QUE TU DEFINES
+            if (bugs > 0)               error "❌ Hay bugs en el código"
+            if (vulns > 0)              error "❌ Hay vulnerabilidades"
+            if (smells > 20)            error "❌ Demasiados code smells (>20)"
+            if (dup > 10)               error "❌ El código tiene más del 10% de duplicación"
+
+            echo "✔ Todas las métricas cumplen los requisitos."
+        }
+    }
+}
+
+        stage('Clonar Repositorio Destino') {
+            steps {
+                bat """
+                cd /d "${PROJECT_DIR}"
+                git clone ${TARGET_REPO} target
+                """
+            }
+        }
+
+        stage('Copiar Código Aprobado') {
+            steps {
+                bat """
+                xcopy "${PROJECT_DIR}\\src\\*" "${PROJECT_DIR}\\target\\" /E /H /C /Y
+                """
+            }
+        }
+
+        stage('Commit & Push') {
+            steps {
+                withCredentials([string(credentialsId: 'github_token', variable: 'GIT_TOKEN')]) {
+                    bat """
+                    cd /d "${PROJECT_DIR}\\target"
+
+                    git config --global user.email "aldanagerardo24@gmail.com"
+                    git config --global user.name "Daniel Aldana"
+
+                    git remote set-url origin https://DaniUTP:%GIT_TOKEN%@github.com/DaniUTP/SermexCalidad.git
+
+                    rem Excluir .scannerwork de Git
+                    echo ".scannerwork" > .gitignore
+
+                    git add .
+                    git commit -m "Push automático desde Jenkins (Quality Gate OK)" || echo "Sin cambios para commit"
+
+                    git push origin main --force
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "Pipeline completado correctamente. Código aprobado y push realizado."
+        }
+        failure {
+            echo "Pipeline falló. Quality Gate no aprobado o error en ejecución."
+        }
+    }
+}
