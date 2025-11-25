@@ -42,83 +42,62 @@ pipeline {
             }
         }
 
-stage('Validar Métricas Reales de SonarQube') {
+stage('Obtener y Validar Métricas SonarQube') {
     steps {
         script {
-            def parseJson = { t -> new groovy.json.JsonSlurper().parseText(t) }
-
-            def reportFile = "${PROJECT_DIR}\\src\\.scannerwork\\report-task.txt"
-            if (!fileExists(reportFile)) error "No existe report-task.txt"
-
-            def contenido = readFile(reportFile)
-            def ceTaskUrl = contenido.split("\n")
-                .find { it.startsWith("ceTaskUrl=") }
-                ?.replace("ceTaskUrl=", "")
-                ?.trim()
-
-            if (!ceTaskUrl) error "ceTaskUrl no encontrado"
-
-            def analysisId = ""
-
-            waitUntil(initialRecurrencePeriod: 4000) {
-                withCredentials([string(credentialsId: 'sonarqube', variable: 'TOKEN')]) {
-                    bat """curl -s -u %TOKEN%: "${ceTaskUrl}" -o "${PROJECT_DIR}\\task.json" """
-                }
-
-                def json = parseJson(readFile("${PROJECT_DIR}\\task.json"))
-                def estado = json.task.status
-
-                echo "Estado CE: ${estado}"
-
-                if (estado == "SUCCESS") {
-                    analysisId = json.task.analysisId
-                    return true
-                }
-                if (estado == "FAILED") error "La tarea CE falló"
-                return false
-            }
-
-            echo "AnalysisId: ${analysisId}"
-
-            // Consultar métricas reales
             withCredentials([string(credentialsId: 'sonarqube', variable: 'TOKEN')]) {
+
+                def metricsUrl = "http://localhost:9000/api/measures/component?component=SERMEX&metricKeys=bugs,vulnerabilities,code_smells,coverage,duplicated_lines_density,security_hotspots"
+
                 bat """
-                curl -s -u %TOKEN%: ^
-                "http://localhost:9000/api/measures/component?component=SERMEX&metricKeys=bugs,vulnerabilities,code_smells,duplicated_lines_density" ^
-                -o "${PROJECT_DIR}\\metrics.json"
+                curl -s -u %TOKEN%: "${metricsUrl}" -o "${PROJECT_DIR}\\metrics.json"
                 """
+
+                def parseJson = { text -> new groovy.json.JsonSlurper().parseText(text) }
+                def json = parseJson(readFile("${PROJECT_DIR}\\metrics.json"))
+
+                echo "=== MÉTRICAS DEL PROYECTO SERMEX ==="
+
+                // Convertir el listado a un mapa {metric:value}
+                def metrics = [:]
+                json.component.measures.each { m ->
+                    metrics[m.metric] = (m.value ?: "0").toFloat()
+                    echo "${m.metric}: ${m.value}"
+                }
+
+                // ---- REGLAS DE VALIDACIÓN ----
+                def errores = []
+
+                if (metrics['bugs'] > 0)
+                    errores << "Bugs detectados: ${metrics['bugs']}"
+
+                if (metrics['vulnerabilities'] > 0)
+                    errores << "Vulnerabilidades encontradas: ${metrics['vulnerabilities']}"
+
+                if (metrics['code_smells'] > 20)   // Cambia el 20 si quieres
+                    errores << "Demasiados code smells: ${metrics['code_smells']}"
+
+                if (metrics['coverage'] < 10)      // Cambia el 10% si quieres
+                    errores << "Cobertura muy baja: ${metrics['coverage']}%"
+
+                if (metrics['duplicated_lines_density'] > 5)
+                    errores << "Código duplicado mayor a 5%: ${metrics['duplicated_lines_density']}%"
+
+                if (metrics['security_hotspots'] > 0)
+                    errores << "Security Hotspots encontrados: ${metrics['security_hotspots']}"
+
+                if (errores) {
+                    echo "=== VALIDACIÓN DE MÉTRICAS FALLÓ ==="
+                    errores.each { e -> echo e }
+                    error "El código NO cumple las métricas mínimas. Se cancela el push."
+                }
+
+                echo "=== MÉTRICAS VALIDAS ==="
+                echo "El código cumple todos los criterios. Continúa el pipeline."
             }
-
-            def metrics = parseJson(readFile("${PROJECT_DIR}\\metrics.json")).component.measures
-
-            def getMetric = { key ->
-                def m = metrics.find { it.metric == key }
-                return m ? m.value.toInteger() : 0
-            }
-
-            def bugs  = getMetric("bugs")
-            def vulns = getMetric("vulnerabilities")
-            def smells = getMetric("code_smells")
-            def dup = metrics.find { it.metric == "duplicated_lines_density" }?.value?.toFloat() ?: 0
-
-            echo "---- MÉTRICAS DETECTADAS ----"
-            echo "Bugs: ${bugs}"
-            echo "Vulnerabilidades: ${vulns}"
-            echo "Code Smells: ${smells}"
-            echo "Duplicación: ${dup}%"
-            echo "-----------------------------"
-
-            // REGLAS QUE TU DEFINES
-            if (bugs > 0)               error "❌ Hay bugs en el código"
-            if (vulns > 0)              error "❌ Hay vulnerabilidades"
-            if (smells > 20)            error "❌ Demasiados code smells (>20)"
-            if (dup > 10)               error "❌ El código tiene más del 10% de duplicación"
-
-            echo "✔ Todas las métricas cumplen los requisitos."
         }
     }
 }
-
         stage('Clonar Repositorio Destino') {
             steps {
                 bat """
