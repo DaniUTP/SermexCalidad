@@ -9,6 +9,10 @@ pipeline {
     }
 
     stages {
+
+        /* =====================================================
+                      PREPARAR WORKSPACE
+        ===================================================== */
         stage('Preparar Workspace') {
             steps {
                 bat """
@@ -18,6 +22,9 @@ pipeline {
             }
         }
 
+        /* =====================================================
+                      CLONAR ZONEMINDER
+        ===================================================== */
         stage('Clonar Repositorio Zoneminder') {
             steps {
                 bat """
@@ -27,6 +34,9 @@ pipeline {
             }
         }
 
+        /* =====================================================
+                      ANALIZAR CON SONARQUBE
+        ===================================================== */
         stage('Analizar con SonarQube') {
             steps {
                 withCredentials([string(credentialsId: 'sonarqube', variable: 'TOKEN')]) {
@@ -42,136 +52,158 @@ pipeline {
             }
         }
 
-       stage('Obtener y Validar Métricas SonarQube') {
-    steps {
-        script {
-            withCredentials([string(credentialsId: 'sonarqube', variable: 'TOKEN')]) {
+        /* =====================================================
+                      ESPERAR CE + OBTENER MÉTRICAS
+        ===================================================== */
+        stage('Obtener y Validar Métricas SonarQube') {
+            steps {
+                script {
+                    withCredentials([string(credentialsId: 'sonarqube', variable: 'TOKEN')]) {
 
-                // 1) Leer report-task.txt para obtener ceTaskUrl
-                def reportFile = "${PROJECT_DIR}\\src\\.scannerwork\\report-task.txt"
-                if (!fileExists(reportFile)) {
-                    error "No se encontró report-task.txt. El análisis no llegó a SonarQube o falló el scanner."
-                }
-                def contenido = readFile(reportFile)
-                def ceTaskUrl = contenido.split("\n").find { it.startsWith("ceTaskUrl=") }?.replace("ceTaskUrl=", "")?.trim()
-                if (!ceTaskUrl) error "ceTaskUrl no encontrado en report-task.txt. No se puede esperar al CE."
+                        /* ---------------------------------------------
+                           LEER report-task.txt PARA OBTENER ceTaskUrl
+                        ---------------------------------------------- */
+                        def reportFile = "${PROJECT_DIR}\\src\\.scannerwork\\report-task.txt"
 
-                echo "CE Task URL: ${ceTaskUrl}"
+                        if (!fileExists(reportFile)) {
+                            error "No se encontró report-task.txt. Algo falló en el análisis."
+                        }
 
-                // 2) Esperar a que la tarea CE termine y obtener analysisId
-                def parseJson = { text -> new groovy.json.JsonSlurper().parseText(text) }
-                def analysisId = null
+                        def contenido = readFile(reportFile)
+                        def ceTaskUrl = contenido.split("\n")
+                            .find { it.startsWith("ceTaskUrl=") }
+                            ?.replace("ceTaskUrl=", "")
+                            ?.trim()
 
-                // Espera con un máximo de intentos (evita colgar forever)
-                def maxAttempts = 60      // si chequeas cada 5s, son ~5 minutos; ajusta si necesitas más tiempo
-                def attempt = 0
-                def ceStatus = null
+                        if (!ceTaskUrl) {
+                            error "No se pudo obtener ceTaskUrl desde report-task.txt"
+                        }
 
-                while (attempt < maxAttempts) {
-                    attempt++
-                    echo "Poll CE status (intent ${attempt}/${maxAttempts})..."
-                    // Llamada al ceTaskUrl y guardar en archivo temporal
-                    bat """curl -s -u %TOKEN%: "${ceTaskUrl}" -o "${PROJECT_DIR}\\task.json" """
+                        echo "CE Task URL: ${ceTaskUrl}"
 
-                    def raw = readFile("${PROJECT_DIR}\\task.json")
-                    def json = parseJson(raw)
-                    ceStatus = json.task?.status
-                    echo "CE status = ${ceStatus}"
+                        /* ---------------------------------------------
+                                   ESPERAR A QUE CE TERMINE
+                        ---------------------------------------------- */
+                        def parseJson = { text -> new groovy.json.JsonSlurper().parseText(text) }
+                        def analysisId = null
+                        def ceStatus = null
 
-                    if (ceStatus == "SUCCESS") {
-                        analysisId = json.task.analysisId
-                        break
-                    } else if (ceStatus == "FAILED") {
-                        error "La CE task falló en SonarQube (status=FAILED). Revisa Sonar logs."
+                        for (int i = 1; i <= 60; i++) {
+                            echo "Esperando CE (Intento ${i}/60)..."
+
+                            bat """
+                            curl -s -u %TOKEN%: ${ceTaskUrl} -o "${PROJECT_DIR}\\task.json"
+                            """
+
+                            def raw = readFile("${PROJECT_DIR}\\task.json")
+                            def json = parseJson(raw)
+
+                            ceStatus = json.task?.status
+                            echo "Estado CE = ${ceStatus}"
+
+                            if (ceStatus == "SUCCESS") {
+                                analysisId = json.task?.analysisId
+                                break
+                            }
+
+                            if (ceStatus == "FAILED") {
+                                error "La tarea CE falló en SonarQube."
+                            }
+
+                            sleep time: 5, unit: 'SECONDS'
+                        }
+
+                        if (!analysisId) {
+                            error "Timeout esperando a que SonarQube termine el análisis."
+                        }
+
+                        echo "AnalysisId obtenido correctamente: ${analysisId}"
+
+                        /* ---------------------------------------------
+                                OBTENER MÉTRICAS CORRECTAMENTE
+                        ---------------------------------------------- */
+                        def metricsUrl = """
+                        http://localhost:9000/api/measures/component?component=SERMEX^&metricKeys=bugs,vulnerabilities,code_smells,coverage,duplicated_lines_density,security_hotspots
+                        """.trim()
+
+                        def jsonMetrics = null
+
+                        for (int i = 1; i <= 10; i++) {
+                            echo "Descargando métricas (Intento ${i}/10)..."
+
+                            bat """
+                            curl -s -u %TOKEN%: ${metricsUrl} -o "${PROJECT_DIR}\\metrics.json"
+                            """
+
+                            def rawMetrics = readFile("${PROJECT_DIR}\\metrics.json")
+                            jsonMetrics = parseJson(rawMetrics)
+
+                            if (jsonMetrics?.component?.measures && jsonMetrics.component.measures.size() > 0) {
+                                echo "Métricas obtenidas correctamente."
+                                break
+                            }
+
+                            echo "Métricas vacías. Reintentando..."
+                            sleep time: 3, unit: 'SECONDS'
+                        }
+
+                        if (!jsonMetrics?.component?.measures || jsonMetrics.component.measures.size() == 0) {
+                            echo "Contenido completo de metrics.json:"
+                            echo readFile("${PROJECT_DIR}\\metrics.json")
+                            error "No se obtuvieron métricas válidas."
+                        }
+
+                        /* ---------------------------------------------
+                               PARSEAR MÉTRICAS NUMÉRICAS
+                        ---------------------------------------------- */
+                        echo "=== MÉTRICAS REPORTADAS POR SONARQUBE ==="
+
+                        def metrics = [:]
+
+                        jsonMetrics.component.measures.each { m ->
+                            def raw = m.value ?: "0"
+                            metrics[m.metric] = new java.math.BigDecimal(raw)
+                            echo "${m.metric}: ${metrics[m.metric]}"
+                        }
+
+                        /* ---------------------------------------------
+                                VALIDACIÓN DE QUALITY GATE
+                        ---------------------------------------------- */
+                        def errores = []
+
+                        if (metrics['bugs'] > 0)
+                            errores << "Bugs encontrados: ${metrics['bugs']}"
+
+                        if (metrics['vulnerabilities'] > 0)
+                            errores << "Vulnerabilidades encontradas: ${metrics['vulnerabilities']}"
+
+                        if (metrics['code_smells'] > 20)
+                            errores << "Muchos code smells: ${metrics['code_smells']}"
+
+                        if (metrics['coverage'] < 80)
+                            errores << "Cobertura menor a 80%: ${metrics['coverage']}%"
+
+                        if (metrics['duplicated_lines_density'] > 5)
+                            errores << "Duplicación de código mayor a 5%: ${metrics['duplicated_lines_density']}%"
+
+                        if (metrics['security_hotspots'] > 0)
+                            errores << "Security Hotspots: ${metrics['security_hotspots']}"
+
+                        if (errores.size() > 0) {
+                            echo "==== ERRORES DETECTADOS ===="
+                            errores.each { echo it }
+                            error "El código NO cumple con los requisitos mínimos."
+                        }
+
+                        echo "✔ TODOS LOS CRITERIOS DE CALIDAD SON CORRECTOS"
                     }
-
-                    // Espera antes del siguiente intento (5s)
-                    sleep time: 5, unit: 'SECONDS'
                 }
-
-                if (!analysisId) {
-                    error "Timeout esperando que SonarQube procese el análisis (CE)."
-                }
-
-                echo "AnalysisId encontrado: ${analysisId}"
-
-                // 3) Pedir métricas — si vienen vacías, reintentar un par de veces
-                def metricsUrlBase = "http://localhost:9000/api/measures/component"
-                def metricKeys = "bugs,vulnerabilities,code_smells,coverage,duplicated_lines_density,security_hotspots"
-                def measuresJsonFile = "${PROJECT_DIR}\\metrics.json"
-                def measuresObj = null
-                def tries = 0
-                def maxMeasureTries = 10
-
-                while (tries < maxMeasureTries) {
-                    tries++
-                    echo "Solicitando métricas (intento ${tries}/${maxMeasureTries})..."
-                    
-                    bat """curl -s -u %TOKEN%: "${metricsUrlBase}?component=SERMEX&metricKeys=${metricKeys}" -o "${measuresJsonFile}" """
-
-                    def rawMetrics = readFile(measuresJsonFile)
-                    measuresObj = parseJson(rawMetrics)
-
-                    if (measuresObj?.component?.measures && measuresObj.component.measures.size() > 0) {
-                        echo "Métricas recibidas correctamente."
-                        break
-                    }
-
-                    echo "Métricas vacías, esperando 3s antes de reintentar..."
-                    sleep time: 3, unit: 'SECONDS'
-                }
-
-                if (!measuresObj?.component?.measures || measuresObj.component.measures.size() == 0) {
-                    echo "DEBUG: contenido metrics.json:\n" + readFile(measuresJsonFile)
-                    error "No se obtuvieron métricas válidas después de varios intentos. measures=[]"
-                }
-
-                def metrics = [:]
-                measuresObj.component.measures.each { m ->
-                    def raw = m.value
-                    if (raw == null || raw.toString().trim() == "") raw = "0"
-                    def num
-                    try {
-                        num = new java.math.BigDecimal(raw.toString())
-                    } catch (Exception ex) {
-                        num = new java.math.BigDecimal("0")
-                    }
-                    metrics[m.metric] = num
-                    echo "${m.metric}: ${num}"
-                }
-
-                def errores = []
-                if (metrics['bugs'].compareTo(new java.math.BigDecimal("0")) > 0) {
-                    errores << "Bugs detectados: ${metrics['bugs']}"
-                }
-                if (metrics['vulnerabilities'].compareTo(new java.math.BigDecimal("0")) > 0) {
-                    errores << "Vulnerabilidades encontradas: ${metrics['vulnerabilities']}"
-                }
-                if (metrics['code_smells'].compareTo(new java.math.BigDecimal("20")) > 0) {
-                    errores << "Demasiados code smells: ${metrics['code_smells']}"
-                }
-                if (metrics['coverage'].compareTo(new java.math.BigDecimal("80")) < 0) {
-                    errores << "Cobertura baja: ${metrics['coverage']}%"
-                }
-                if (metrics['duplicated_lines_density'].compareTo(new java.math.BigDecimal("5")) > 0) {
-                    errores << "Código duplicado mayor a 5%: ${metrics['duplicated_lines_density']}%"
-                }
-                if (metrics['security_hotspots'].compareTo(new java.math.BigDecimal("0")) > 0) {
-                    errores << "Security Hotspots encontrados: ${metrics['security_hotspots']}"
-                }
-
-                if (errores.size() > 0) {
-                    echo "HAY ERRORES EN EL CÓDIGO"
-                    errores.each { e -> echo e }
-                    error "El código no cumple los requisitos mínimos. Se cancela el push."
-                }
-
-                echo "EL CODIGO CUMPLE LOS REQUISITOS MINIMOS"
             }
         }
-    }
-}
 
+        /* =====================================================
+                      COPIA + PUSH A REPO DESTINO
+        ===================================================== */
         stage('Clonar Repositorio SermexCalidad') {
             steps {
                 bat """
@@ -194,17 +226,14 @@ pipeline {
                 withCredentials([string(credentialsId: 'github_token', variable: 'GIT_TOKEN')]) {
                     bat """
                     cd /d "${PROJECT_DIR}\\target"
-
                     git config --global user.email "aldanagerardo24@gmail.com"
                     git config --global user.name "Daniel Aldana"
-
                     git remote set-url origin https://DaniUTP:%GIT_TOKEN%@github.com/DaniUTP/SermexCalidad.git
 
-                    rem Excluir .scannerwork de Git
                     echo ".scannerwork" > .gitignore
 
                     git add .
-                    git commit -m "Push automático desde Jenkins (Quality Gate OK)" || echo "Sin cambios para commit"
+                    git commit -m "Push automático desde Jenkins (Quality Gate OK)" || echo "Sin cambios"
 
                     git push origin main --force
                     """
@@ -215,10 +244,10 @@ pipeline {
 
     post {
         success {
-            echo "Pipeline completado correctamente. Código aprobado y push realizado."
+            echo "PIPELINE COMPLETO — PUSH REALIZADO"
         }
         failure {
-            echo "Pipeline falló. Quality Gate no aprobado o error en ejecución."
+            echo "PIPELINE FALLÓ — QUALITY GATE NO APROBADO"
         }
     }
 }
