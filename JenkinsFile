@@ -1,10 +1,14 @@
 pipeline {
-    agent any
+    agent any //Indica que Jenkins puede ejecutar el pipeline en cualquier nodo o ambiente disponible
 
-    environment {
+    environment { //Se definen variables de entorno que se usarán en el pipeline
+        // Carpeta principal donde Jenkins trabajará con archivos temporales.
         PROJECT_DIR   = "${WORKSPACE}\\project"
+        // Repositorio original que se va a analizar con SonarQube.
         SOURCE_REPO   = "https://github.com/ZoneMinder/zoneminder.git"
+        // Repositorio donde se realizará el push del código si pasa el análisis de calidad.
         TARGET_REPO   = "https://github.com/DaniUTP/SermexCalidad.git"
+        // Ruta del programa SonarScanner instalado manualmente en Windows.
         SONAR_SCANNER = "C:\\Users\\Daniel\\Documents\\Actividades avanzadas calidad de software\\expo calidad repo daniel\\sonar-scanner-cli-7.3.0.5189-windows-x64\\sonar-scanner-7.3.0.5189-windows-x64\\bin\\sonar-scanner.bat"
     }
 
@@ -12,7 +16,9 @@ pipeline {
         stage('Preparar Workspace') {
             steps {
                 bat """
+                // Si ya existe una carpeta llamada project, se borrará.
                 if exist "${PROJECT_DIR}" rd /s /q "${PROJECT_DIR}"
+                // Se creará la carpeta project.
                 mkdir "${PROJECT_DIR}"
                 """
             }
@@ -21,7 +27,9 @@ pipeline {
         stage('Clonar Repositorio Zoneminder') {
             steps {
                 bat """
+                // Entramos a la carpeta del proyecto.
                 cd /d "${PROJECT_DIR}"
+                 // Clonamos el repositorio fuente dentro de una carpeta llamada src.
                 git clone ${SOURCE_REPO} src
                 """
             }
@@ -29,14 +37,17 @@ pipeline {
 
         stage('Analizar con SonarQube') {
             steps {
+                // Obtenemos el token de SonarQube guardado en Jenkins para autenticar el análisis.
                 withCredentials([string(credentialsId: 'sonarqube', variable: 'TOKEN')]) {
                     bat """
+                    // Nos movemos a la carpeta donde está el código descargado.
                     cd /d "${PROJECT_DIR}\\src"
+                     // Ejecutamos el programa SonarScanner para analizar la calidad del código.
                     "${SONAR_SCANNER}" ^
-                        -Dsonar.projectKey=SERMEX ^
-                        -Dsonar.sources=. ^
-                        -Dsonar.host.url=http://localhost:9000 ^
-                        -Dsonar.token=%TOKEN%
+                        -Dsonar.projectKey=SERMEX ^ //Clave del proyecto
+                        -Dsonar.sources=. ^ //Carpeta a analizar
+                        -Dsonar.host.url=http://localhost:9000 ^ //Dirección del servidor de SonarQube
+                        -Dsonar.token=%TOKEN%  //Token de autenticación
                     """
                 }
             }
@@ -45,27 +56,31 @@ pipeline {
         stage('Obtener y Validar Métricas SonarQube') {
             steps {
                 script {
+                     // Volvemos a usar el token para consultar las métricas del análisis recién ejecutado
                     withCredentials([string(credentialsId: 'sonarqube', variable: 'TOKEN')]) {
-
+                        // URL para obtener métricas específicas del análisis (bugs, vulnerabilidades, cobertura, etc.)
                         def metricsUrl = "http://localhost:9000/api/measures/component?component=SERMEX&metricKeys=bugs,vulnerabilities,code_smells,coverage,duplicated_lines_density,security_hotspots"
 
                         bat """
+                        // Llamamos a la API de SonarQube para descargar las métricas en formato JSON.
                         curl -s -u %TOKEN%: "${metricsUrl}" -o "${PROJECT_DIR}\\metrics.json"
                         """
-
+                        // Convertimos el archivo JSON descargado en un objeto para leer los valores.
                         def parseJson = { text -> new groovy.json.JsonSlurper().parseText(text) }
                         def json = parseJson(readFile("${PROJECT_DIR}\\metrics.json"))
 
                         echo "Metricas obtenidas del analisis del proyecto:"
 
+                        // Guardamos las métricas en un mapa para analizarlas.
                         def metrics = [:]
                         json.component.measures.each { m ->
                             metrics[m.metric] = (m.value ?: "0").toFloat()
                             echo "${m.metric}: ${m.value}"
                         }
 
+                         // Lista donde se irán acumulando los errores encontrados.
                         def errores = []
-
+                        // Se comparan las métricas con valores mínimos requeridos que se han establecido.
                         if (metrics['bugs'] > 0)
                             errores << "Bugs detectados: ${metrics['bugs']}"
 
@@ -84,12 +99,13 @@ pipeline {
                         if (metrics['security_hotspots'] > 0)
                             errores << "Security Hotspots encontrados: ${metrics['security_hotspots']}"
 
+                        // Si se encontraron errores, se muestra cada uno y se cancela el push.
                         if (errores) {
                             echo "HAY ERRORES EN EL CÓDIGO"
                             errores.each { e -> echo e }
                             error "El código no cumple los requisitos mínimos. Se cancela el push."
                         }
-
+                        // Si no hubo errores, el pipeline continúa.
                         echo "EL CODIGO CUMPLE LOS REQUISITOS MINIMOS"
                         echo "El código cumple todos los criterios. Continúa el pipeline."
                     }
@@ -99,6 +115,7 @@ pipeline {
         stage('Clonar Repositorio SermexCalidad') {
             steps {
                 bat """
+                 // Se clona el repositorio destino donde se enviará el código aprobado.
                 cd /d "${PROJECT_DIR}"
                 git clone ${TARGET_REPO} target
                 """
@@ -108,6 +125,7 @@ pipeline {
         stage('Copiar Código Aprobado') {
             steps {
                 bat """
+                // Se copian todos los archivos del repositorio fuente hacia el repositorio destino.
                 xcopy "${PROJECT_DIR}\\src\\*" "${PROJECT_DIR}\\target\\" /E /H /C /Y
                 """
             }
@@ -115,21 +133,27 @@ pipeline {
 
         stage('Commit y Push') {
             steps {
+                // Se usa el token de GitHub para subir cambios automáticamente.
                 withCredentials([string(credentialsId: 'github_token', variable: 'GIT_TOKEN')]) {
                     bat """
                     cd /d "${PROJECT_DIR}\\target"
 
+                    // Se configura el usuario de Git.
                     git config --global user.email "aldanagerardo24@gmail.com"
                     git config --global user.name "Daniel Aldana"
 
+                    // Se actualiza la URL del repositorio para usar el token.
                     git remote set-url origin https://DaniUTP:%GIT_TOKEN%@github.com/DaniUTP/SermexCalidad.git
 
+                    // Se ignora la carpeta .scannerwork para no subir archivos innecesarios.
                     rem Excluir .scannerwork de Git
                     echo ".scannerwork" > .gitignore
 
+                    // Se agregan y confirman los cambios.
                     git add .
                     git commit -m "Push automático desde Jenkins (Quality Gate OK)" || echo "Sin cambios para commit"
 
+                    // Se suben los cambios al repositorio remoto.
                     git push origin main --force
                     """
                 }
@@ -139,9 +163,11 @@ pipeline {
 
     post {
         success {
+            // Se muestra un mensaje indicando que el pipeline se completó correctamente.
             echo "Pipeline completado correctamente. Código aprobado y push realizado."
         }
         failure {
+            // Se muestra un mensaje indicando que el pipeline falló.
             echo "Pipeline falló. Quality Gate no aprobado o error en ejecución."
         }
     }
