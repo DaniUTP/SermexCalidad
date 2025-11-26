@@ -59,10 +59,27 @@ pipeline {
                         echo "Metricas obtenidas del analisis del proyecto:"
 
                         def metrics = [:]
-                        json.component.measures.each { m ->
-                            metrics[m.metric] = (m.value ?: "0").toFloat()
-                            echo "${m.metric}: ${m.value}"
-                        }
+
+                            json.component.measures.each { m ->
+
+                                def rawValue = m.value
+
+                                if (rawValue == null || rawValue.trim() == "") {
+                                    rawValue = "0"
+                                }
+
+                                // Convertir correctamente a número flotante
+                                def numberValue
+                                try {
+                                    numberValue = rawValue.toBigDecimal()
+                                } catch (Exception e) {
+                                    numberValue = 0
+                                }
+
+                                metrics[m.metric] = numberValue
+
+                                echo "${m.metric}: ${numberValue}"
+                            }
 
                         def errores = []
 
