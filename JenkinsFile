@@ -75,8 +75,8 @@ pipeline {
                         if (metrics['code_smells'] > 20)
                             errores << "Demasiados code smells: ${metrics['code_smells']}"
 
-                        if (metrics['coverage'] < 10)
-                            errores << "Cobertura muy baja: ${metrics['coverage']}%"
+                        if (metrics['coverage'] < 80)
+                            errores << "Cobertura baja: ${metrics['coverage']}%"
 
                         if (metrics['duplicated_lines_density'] > 5)
                             errores << "Código duplicado mayor a 5%: ${metrics['duplicated_lines_density']}%"
